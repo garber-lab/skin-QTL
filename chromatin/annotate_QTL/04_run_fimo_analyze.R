@@ -16,25 +16,28 @@ source(path.Rscript.fetch_mean_CPM_of_genes)
 # -----------------------------
 # user settings
 # -----------------------------
+args <- commandArgs(trailingOnly = TRUE)
 dir <- args[1]
 this_snp <- args[2]
-prefix <- args[3]
-this_celltype <- args[4] 
-this_condition <- args[5]
+this_celltype <- args[3] 
+this_condition <- args[4]
 
-dir <- "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/annotate_QTL"
+dir <- "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/annotate_QTL/rs838146"
 this_snp <- "rs838146"
-prefix <- "rs838146"
 this_celltype <- "FRB"
 this_condition <- "TNF"
 
 fimo_file <- paste0(dir, "/fimo_output_", this_snp, ".txt")
-out_file <- paste0(dir, "/fimo_output_analysis_",prefix,"_",this_celltype,"_",this_condition,".txt")
+out_file <- paste0(dir, "/fimo_output_analysis_",this_snp,"_",this_celltype,"_",this_condition,".txt")
+
+snp_seq_ref <- fread(paste0(dir,"/SNP_slop100_REF.fa"))
+snp_seq_alt <- fread(paste0(dir,"/SNP_slop100_ALT.fa"))
 
 # -----------------------------
 # read FIMO comparison result
 # -----------------------------
-fimo <- read_tsv(fimo_file, show_col_types = FALSE)
+fimo <- read_tsv(fimo_file, show_col_types = FALSE) %>%
+  dplyr::mutate(TF = str_replace(motif_id, "\\.H12CORE.*$", ""))
 
 # -----------------------------
 # extract TF gene symbol from motif_id
@@ -42,9 +45,16 @@ fimo <- read_tsv(fimo_file, show_col_types = FALSE)
 #   EGR1.H12CORE.0.PS.A  -> EGR1
 #   SP1.H12CORE.0.P.B    -> SP1
 # -----------------------------
+lambert_tf <- fread("/pi/manuel.garber-umw/human/skin/eQTLs/literature/Lambert_2018_human_TF_table.csv", sep=",") %>%
+  dplyr::select(c("Name","DBD")) %>%
+  set_colnames(c("Name","TF_family"))
+lambert_tf$TF_family <- gsub(";_", ";", gsub(" ", "_", lambert_tf$TF_family))
+
 fimo2 <- fimo %>%
-  mutate(
-    TF = str_replace(motif_id, "\\.H12CORE.*$", "")
+  left_join( . , lambert_tf, by=c("TF"="Name")) %>%
+  dplyr::filter(
+    # meaningful allelic difference (~5 fold change in p-value)
+    priority_abs_delta_log10p >= 0.75
   )
 
 # -----------------------------
@@ -52,7 +62,7 @@ fimo2 <- fimo %>%
 # one TF can have multiple motif models / rows
 # -----------------------------
 tf_summary <- fimo2 %>%
-  group_by(TF) %>%
+  group_by(TF, TF_family) %>%
   summarise(
     n_motifs = n(),
     n_gained_in_ALT = sum(motif_change_class == "gained_in_ALT", na.rm = TRUE),
@@ -62,11 +72,9 @@ tf_summary <- fimo2 %>%
     best_priority_abs_delta_log10p = max(priority_abs_delta_log10p, na.rm = TRUE),
     best_abs_delta_score = max(abs(delta_score_ALT_minus_REF), na.rm = TRUE),
     strongest_change_class = motif_change_class[which.max(replace_na(priority_abs_delta_log10p, -Inf))],
+    best_qvalue = min(pmin(qvalue_REF, qvalue_ALT), na.rm = TRUE),
     .groups = "drop"
-  )
-
-# if some columns are all NA for some TFs, clean up
-tf_summary <- tf_summary %>%
+  ) %>%
   mutate(
     best_priority_abs_delta_log10p = ifelse(is.infinite(best_priority_abs_delta_log10p), NA, best_priority_abs_delta_log10p),
     best_abs_delta_score = ifelse(is.infinite(best_abs_delta_score), NA, best_abs_delta_score)
@@ -105,15 +113,7 @@ gene_exprs_annotation <- data.frame(
 tf_ranked <- tf_summary %>%
   left_join(gene_exprs_annotation, by = c("TF"="gene")) %>%
   mutate(
-    TF_family = case_when(
-      str_detect(TF, "^KLF") ~ "KLF",
-      str_detect(TF, "^SP[0-9]$") ~ "SP",
-      str_detect(TF, "^EGR") ~ "EGR",
-      str_detect(TF, "^ZNF|^ZN") ~ "Zinc_finger",
-      str_detect(TF, "^E2F") ~ "E2F",
-      TRUE ~ "Other"
-    ),
-    interesting_by_motif = case_when(
+     interesting_by_motif = case_when(
       n_gained_in_ALT > 0 ~ TRUE,
       n_lost_in_ALT > 0 ~ TRUE,
       best_priority_abs_delta_log10p >= 0.5 ~ TRUE,
@@ -128,13 +128,30 @@ tf_ranked <- tf_summary %>%
     desc(n_gained_in_ALT + n_lost_in_ALT),
     desc(best_priority_abs_delta_log10p),
     desc(best_abs_delta_score)
+  ) %>%
+  mutate(
+    priority_tier = case_when(
+      interesting_final & best_priority_abs_delta_log10p >= 1.0 ~ "Tier1_high_confidence",
+      interesting_final & best_priority_abs_delta_log10p >= 0.75 ~ "Tier2_moderate",
+      interesting_final ~ "Tier3_expressed_hits",
+      TRUE ~ "not_prioritized"
+    )
   )
+tf_ranked$priority_tier <- ordered(tf_ranked$priority_tier, levels=c("Tier1_high_confidence","Tier2_moderate","Tier3_expressed_hits","not_prioritized"))
 
 # -----------------------------
 # write a full ranked table
 # -----------------------------
 tf_ranked_filtered <- tf_ranked %>%
-  dplyr::filter(interesting_final==TRUE) 
+  dplyr::filter(interesting_final==TRUE) %>%
+  arrange(priority_tier)
+
 
 fwrite(tf_ranked_filtered, file=out_file, quote=F, sep="\t")
 cat("Wrote fimo TF result to:", out_file, "\n")
+
+# -------------------------------
+# save RDS for downstream processing
+# -------------------------------
+out_prefix <- paste0(dir, "/fimo_summary_", this_snp, "_", this_celltype, "_", this_condition)
+save(fimo, fimo2, tf_ranked, file = paste0(out_prefix, "objects.RData"))

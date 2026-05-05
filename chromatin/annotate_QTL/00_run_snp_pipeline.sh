@@ -34,5 +34,14 @@ bash "${SCRIPTS_DIR}/03_overlap_tfbs.sh" "${workingdir}" "${snp_id}" "${snp_bed}
 # ── Step 4: FIMO motif analysis ─────────────────────────────────────────────
 echo -e "\n[Step 4] Running FIMO..." ; date
 bash "${SCRIPTS_DIR}/04_run_fimo.sh" "${workingdir}" "${snp_id}" "${snp_bed}"
+ct=FRB
+cond=TNF
+singularity exec /share/pkg/containers/rstudio_example/r_4.5.2.sif \
+	Rscript ${SCRIPTS_DIR}/04_run_fimo_analyze.R "${workingdir}" "${snp_id}" "${ct}" "${cond}"
 
+singularity exec /share/pkg/containers/rstudio_example/r_4.5.2.sif \
+        Rscript ${SCRIPTS_DIR}/04_annotate_SNP_context.R "${workingdir}" "${snp_id}"
+
+singularity exec /share/pkg/containers/rstudio_example/r_4.5.2.sif \
+	Rscript ${SCRIPTS_DIR}/04_compile_fimo_output_plots.R "${workingdir}" "${snp_id}" "${ct}" "${cond}"
 echo -e "\n=== Pipeline complete for ${snp_id} ===" ; date

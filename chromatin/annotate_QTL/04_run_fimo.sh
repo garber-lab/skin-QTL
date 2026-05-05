@@ -17,7 +17,7 @@ cd "${workingdir}"
 ########## create SNP bed if needed
 if [[ -z "${snp_bed}" || ! -f "${snp_bed}" ]]; then
     echo "Warning: SNP bed not provided or not found, generating now"
-    bash /pi/manuel.garber-umw/human/skin/eQTLs/chromatin/annotate_QTL/scripts/01_compile_snp_bed.sh "${workingdir}" "${snp_id}"
+    bash /pi/manuel.garber-umw/human/skin/eQTLs/chromatin/annotate_QTL/01_compile_snp_bed.sh "${workingdir}" "${snp_id}"
     snp_bed="${workingdir}/QTL_${snp_id}.bed"
 fi
 

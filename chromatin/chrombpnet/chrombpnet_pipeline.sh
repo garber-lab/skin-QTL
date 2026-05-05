@@ -25,7 +25,7 @@ cp /pi/manuel.garber-umw/human/skin/eQTLs/chromatin/chrombpnet/chrombpnet_tutori
 module load samtools
 prefix=ATAC_F111_KRT_PBS_S1
 origbamF=/pi/manuel.garber-umw/human/skin/eQTLs/ATACseq_DolphinNext/encode_atacseq_pipeline/bam_dedupped/${prefix}.nodup.bam
-origbamIdxF=${bamF}.bai
+origbamIdxF=${origbamF}.bai
 echo "sorting bam now";date
 cp ${origbamF} ${dir}/data/downloads/merged.bam
 #samtools sort -@4 ${origbamF} -o ${dir}/data/downloads/merged.bam
