@@ -1,0 +1,700 @@
+---
+title: "skineQTL_RNAseq_analysis_phase1and2_updatedESATreanalysis"
+author: "Shuo Shan"
+date: "2026-10-20"
+output: html_document
+---
+
+```{r package, warning=FALSE}
+.libPaths(c("/home/shuo.shan-umw/R/x86_64-pc-linux-gnu-library/4.2", .libPaths()))
+library(tidyverse)
+library(DESeq2)
+library(magrittr)
+library(stringr)
+library(gplots)
+library(ggfortify)
+library(gridExtra)
+library(ggpubr)
+library(ComplexHeatmap)
+library(circlize)
+library(cowplot)
+library(ggbeeswarm)
+library(sva)
+library(clusterProfiler)
+library(plotly)
+library(Mfuzz)
+library(Biobase)
+library(org.Hs.eg.db)  
+library(enrichplot)
+
+
+Dir="/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/analysis_10202026"
+setwd(Dir)
+
+#save.image(file=paste0(Dir,'/myEnvironment_main.RData'))
+#load(paste0(Dir,"/myEnvironment_main.RData")) # raw counts, CPM, log2(CPM+1), metadata, expressed genes by ct, dds object for each ct
+
+#fwrite(counts.clean %>% rownames_to_column("gene"), file=paste0(Dir,"raw_counts_clean_phase1and2.tsv"), quote=F, sep="\t")
+
+# load meta genes to gene name dictionary
+metagene_dict <- data.table::fread("/pi/manuel.garber-umw/human/skin/eQTLs/literature/metaidname.txt") %>% 
+  dplyr::select(-id) %>% distinct()
+metagene_dict_collapsed <- metagene_dict %>% group_by(meta) %>% 
+  summarize(source=paste(name,collapse=','))
+```
+
+```{r functions}
+# useful function
+convert_meta_genes <- function(gene_vector) {
+  # Identify meta genes in the input vector
+  meta_genes <- gene_vector[grepl("meta", gene_vector)]
+  non_meta_genes <- gene_vector[!grepl("meta", gene_vector)]
+  
+  # Convert meta genes to actual gene names using metagene_dict
+  meta_to_gene <- metagene_dict$name[metagene_dict$meta %in% meta_genes]
+  
+  # Combine non-meta genes and converted meta genes, ensuring uniqueness
+  converted_genes <- unique(c(non_meta_genes, meta_to_gene))
+  
+  return(converted_genes)
+}
+niceKmeans <-function (df, k, kmeans.algorithm = "Lloyd", iter.max = 1000, nstart=100) {
+  
+  result = data.frame();
+  source = t(scale(t(df)));
+  kmeans = kmeans(source, centers = k, iter.max = iter.max, algorithm=kmeans.algorithm, nstart=nstart);
+  clustered = data.frame();
+  breaks = c();
+  for (i in 1:k) {
+    print(sprintf("Doing cluster %i",i))
+    cluster = source[kmeans$cluster==i,];
+    rows = row.names(cluster);
+    clust = heatmap.2(as.matrix(cluster), distfun=function(x) as.dist((1-cor(t(x)))/2))
+    cluster.ordered = cluster[clust$rowInd,];
+    cluster.ordered.genes = rows[clust$rowInd];
+    row.names(cluster.ordered) = cluster.ordered.genes;
+    class = data.frame(row.names=cluster.ordered.genes);
+    class[,"class"] = i 
+    cluster.ordered = cbind(cluster.ordered, class);
+    clustered = rbind(clustered, cluster.ordered);
+    if(i > 1 & i < k) {
+      breaks[i] = as.numeric(breaks[i-1]) + length(rows);
+    } else if(i==1) {
+      breaks[i] = length(rows);
+    }
+  }
+  
+  result <- list();
+  result$clustered <- clustered;
+  result$breaks <- breaks;
+  return(result);
+}
+
+create_table <- function(Dir, file_lst) {
+  f=file_lst[1]
+  sample=gsub("_sorted_esat\\.txt\\.gene\\.txt","",f)
+  df <- read.table(paste0(Dir,"/",f), sep="\t", header=TRUE) %>% 
+    tidyr::unite( .,"region",c("Symbol","chr","strand"),sep=";",remove=TRUE) %>% 
+    mutate(sum=rowSums(select_if(., is.numeric))) %>%
+    dplyr::select(c("region",sum)) %>% 
+    magrittr::set_colnames(c("region",sample))
+  
+  if (length(file_lst) > 1) {
+    for (f in file_lst[2:length(file_lst)]) {
+      sample=gsub("_sorted_esat\\.txt\\.gene\\.txt","",f)
+      df.this <- read.table(paste0(Dir,"/",f), sep="\t", header=TRUE) %>% 
+        tidyr::unite( .,"region",c("Symbol","chr","strand"),sep=";",remove=TRUE) %>% 
+        mutate(sum=rowSums(select_if(., is.numeric))) %>%
+        dplyr::select(c("region",sum)) %>% 
+        magrittr::set_colnames(c("region",sample))
+    
+    df <- dplyr::left_join(df,df.this,by="region")
+    }
+  }
+  df <- df %>% tibble::column_to_rownames( . , "region")
+  return(df)
+  rm(f,sample,df,df.this)
+}
+
+create_umi_table <- function(Dir, file_lst) {
+  samples <- gsub("_sorted\\.umi\\.distributions\\.txt$", "", file_lst)
+
+  umi.long <- lapply(seq_along(file_lst), function(k) {
+    data.table::fread(file.path(Dir, file_lst[k]), header = FALSE,
+                      col.names = c("barcode", "gene", "umi", "reads")) %>%
+      dplyr::mutate(sample = samples[k])
+  }) %>% data.table::rbindlist()
+
+  umi.long %>%
+    dplyr::distinct(sample, barcode, gene, umi) %>%      # one row per unique molecule
+    dplyr::count(sample, gene, name = "n_umi") %>%       # distinct UMIs per gene, summed over barcodes
+    tidyr::pivot_wider(names_from = sample, values_from = n_umi, values_fill = 0) %>%
+    dplyr::select(gene, dplyr::all_of(samples)) %>%      # keep file order, like create_table
+    tibble::column_to_rownames("gene") %>%
+    as.data.frame()
+}
+
+convert_to_entrez <- function(gene_list) {
+  bitr(gene_list, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+}
+convert_from_entrez <- function(id_list) {
+  bitr(id_list, fromType = "ENTREZID", toType = "SYMBOL", OrgDb = org.Hs.eg.db)
+}
+
+plot_paired_plot <- function(gene){
+  g=gene
+  df <- data.frame(CPM = as.numeric(t(CPM.clean[g,])), 
+                   sample = colnames(CPM.clean)) %>%
+    left_join(. , metadata[,c("sample","donor","celltype","condition")], by="sample")
+  
+  df.ifng <- df %>% dplyr::filter(condition%in%c("PBS","IFNG"))
+  df.ifnb <- df %>% dplyr::filter(condition%in%c("PBS","IFNB"))
+  df.tnf <- df %>% dplyr::filter(condition%in%c("PBS","TNF"))
+  
+  # make paired plots
+  position <- "identity"; width = 0.5; point.size = 2; line.size = 0.5
+  line.color = "grey"; linetype = "solid"; palette="bright"
+  
+  p.ifng <- ggplot(df.ifng, create_aes(list(x = "condition", y = "CPM"))) +
+    geom_exec(geom_point, data = df.ifng, color = "condition", size = point.size,
+              position = "jitter") +
+    scale_color_manual(values=c("#999999","#E69F00"))+
+    labs(title=g)+
+    theme(legend.position="none") +
+    facet_wrap(~ celltype)
+  
+  p.ifnb <- ggplot(df.ifnb, create_aes(list(x = "condition", y = "CPM"))) +
+    geom_exec(geom_line, data = df.ifnb, group = "donor",
+              color = line.color, size = line.size, linetype = linetype,
+              position = position) +
+    geom_exec(geom_point, data = df.ifnb, color = "condition", size = point.size,
+              position = position) +
+    scale_color_manual(values=c("#999999","darkgreen"))+
+    labs(title=g)+
+    theme(legend.position="none") +
+    facet_wrap(~ celltype)
+  
+  p.tnf <- ggplot(df.tnf, create_aes(list(x = "condition", y = "CPM"))) +
+    geom_exec(geom_line, data = df.tnf, group = "donor",
+              color = line.color, size = line.size, linetype = linetype,
+              position = position) +
+    geom_exec(geom_point, data = df.tnf, color = "condition", size = point.size,
+              position = position) +
+    scale_color_manual(values=c("#999999","purple"))+
+    labs(title=g)+
+    theme(legend.position="none") +
+    facet_wrap(~ celltype)
+  
+  final_plot <- plot_grid(
+    p.ifng, p.ifnb, p.tnf,
+    nrow = 1, ncol = 3
+  )
+  
+  return(final_plot)
+}
+
+plot_violinbox_plot <- function(gene){
+  g=gene
+  df <- data.frame(CPM = as.numeric(t(CPM.clean[g,])), 
+                   sample = colnames(CPM.clean)) %>%
+    left_join(. , metadata[,c("sample","donor","celltype","condition")], by="sample")
+  
+  df.ifng <- df %>% dplyr::filter(condition%in%c("PBS","IFNG"))
+  df.ifnb <- df %>% dplyr::filter(condition%in%c("PBS","IFNB"))
+  df.tnf <- df %>% dplyr::filter(condition%in%c("PBS","TNF"))
+  
+  # make paired plots
+  position <- "identity"; width = 0.5; point.size = 2; line.size = 0.5
+  line.color = "grey"; linetype = "solid"; palette="bright"
+  
+  p.ifng <- ggplot(df.ifng, aes(x = condition, y = CPM, fill = condition, color = condition)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "IFNG" = "#E69F00")) +
+    scale_color_manual(values = c("PBS" = "#999999", "IFNG" = "#E69F00")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~celltype)
+  
+  p.ifnb <- ggplot(df.ifnb, aes(x = condition, y = CPM, fill = condition, color = condition)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "IFNB" = "darkgreen")) +
+    scale_color_manual(values = c("PBS" = "#999999", "IFNB" = "darkgreen")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~celltype)
+  
+  p.tnf <- ggplot(df.tnf, aes(x = condition, y = CPM, fill = condition, color = condition)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "TNF" = "purple")) +
+    scale_color_manual(values = c("PBS" = "#999999", "TNF" = "purple")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~celltype)
+  
+  final_plot <- plot_grid(
+    p.ifng, p.ifnb, p.tnf,
+    nrow = 1, ncol = 3
+  )
+  
+  return(final_plot)
+}
+
+plot_violinbox_plot_cytokine_faceted <- function(gene){
+  g=gene
+  df <- data.frame(CPM = as.numeric(t(CPM.clean[g,])), 
+                   sample = colnames(CPM.clean)) %>%
+    left_join(. , metadata[,c("sample","donor","celltype","condition","phase")], by="sample")
+  
+  df$condition <- ordered(df$condition, levels=c("PBS","IFNB","IFNG","TNF"))
+  
+  df.krt <- df %>% dplyr::filter(celltype=="KRT")
+  df.mel <- df %>% dplyr::filter(celltype=="MEL")
+  df.frb <- df %>% dplyr::filter(celltype=="FRB")
+  
+  # make paired plots
+  position <- "identity"; width = 0.5; point.size = 2; line.size = 0.5
+  line.color = "grey"; linetype = "solid"; palette="bright"
+  
+  p.krt <- ggplot(df.krt, aes(x = celltype, y = CPM, fill = celltype, color = celltype)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "KRT" = "#DAF7A6")) +
+    scale_color_manual(values = c("PBS" = "#999999", "KRT" = "#DAF7A6")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~condition, nrow=1)
+  
+  p.mel <- ggplot(df.mel, aes(x = celltype, y = CPM, fill = celltype, color = celltype)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "MEL" = "#C68452")) +
+    scale_color_manual(values = c("PBS" = "#999999", "MEL" = "#C68452")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~condition, nrow=1)
+  
+    p.frb <- ggplot(df.frb, aes(x = celltype, y = CPM, fill = celltype, color = celltype)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "FRB" = "#CCCCFF")) +
+    scale_color_manual(values = c("PBS" = "#999999", "FRB" = "#CCCCFF")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~condition, nrow=1)
+  
+  final_plot <- plot_grid(
+    p.krt, p.mel, p.frb,
+    nrow = 1, ncol = 3
+  )
+  
+  return(final_plot)
+}
+
+plot_violinbox_plot_cytokine_faceted_by_celltype_grouped_by_phase <- function(gene){
+  g=gene
+  df <- data.frame(CPM = as.numeric(t(CPM.clean[g,])), 
+                   sample = colnames(CPM.clean)) %>%
+    left_join(. , metadata[,c("sample","donor","celltype","condition","phase")], by="sample")
+  
+  df$condition <- ordered(df$condition, levels=c("PBS","IFNB","IFNG","TNF"))
+  
+  df.krt <- df %>% dplyr::filter(celltype=="KRT")
+  df.mel <- df %>% dplyr::filter(celltype=="MEL")
+  df.frb <- df %>% dplyr::filter(celltype=="FRB")
+  
+  # make paired plots
+  position <- "identity"; width = 0.5; point.size = 2; line.size = 0.5
+  line.color = "grey"; linetype = "solid"; palette="bright"
+  
+  p.krt <- ggplot(df.krt, aes(x = phase, y = CPM, fill = celltype, color = celltype, group = phase)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "KRT" = "#DAF7A6")) +
+    scale_color_manual(values = c("PBS" = "#999999", "KRT" = "#DAF7A6")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~condition, nrow=1)
+  
+  p.mel <- ggplot(df.mel, aes(x = phase, y = CPM, fill = celltype, color = celltype)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "MEL" = "#C68452")) +
+    scale_color_manual(values = c("PBS" = "#999999", "MEL" = "#C68452")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~condition, nrow=1)
+  
+    p.frb <- ggplot(df.frb, aes(x = phase, y = CPM, fill = celltype, color = celltype)) +
+    geom_violin(width = 0.9, alpha = 0.35, trim = FALSE) +
+    ggbeeswarm::geom_quasirandom(width = 0.18, size = 2, alpha = 0.9) +
+    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.7, color = "black") +
+    scale_fill_manual(values = c("PBS" = "#999999", "FRB" = "#CCCCFF")) +
+    scale_color_manual(values = c("PBS" = "#999999", "FRB" = "#CCCCFF")) +
+    labs(title = g, x = NULL, y = "CPM") +
+    theme_classic() +
+    theme(legend.position = "none") +
+    facet_wrap(~condition, nrow=1)
+  
+  final_plot <- plot_grid(
+    p.krt, p.mel, p.frb,
+    nrow = 1, ncol = 3
+  )
+  
+  return(final_plot)
+}
+```
+
+## Overview
+Celseq2 RNAseq data from skin-eQTL data. phase1 and phase2 fastq files were processed, aligned, and counted by Via Foundry's ESAT 3.0 pipeline with custom genome with meta genes (ESAT is updated Oct 2026 to account for previous UMI overcollapsing)
+
+## Load counts and UMIs before ESAT was updated
+### phase1 samples mapped with oldESAT (no merged samples, lengths vary from 36bp to 56bp)
+```{r load-phase1-countmatrix-oldESAT}
+Dir.esat.list=c("/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/DolphinNext/phase1_rerun_customGenome/archive2025/report10996/ESAT",
+                "/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/DolphinNext/phase1_rerun_customGenome/F44_KRT_PBS/report11029/ESAT")
+
+counts.phase1.list <- list()
+umis.phase1.list <- list()
+metadata.phase1.list <- list()
+
+# mitochondrial genes
+MTgenes <- read.table("/pi/manuel.garber-umw/human/skin/eQTLs/literature/UCSC_tracks/Ensembl_GRCh38.105_mitochondrial_genes.txt")
+
+for (i in 1:length(Dir.esat.list)) {
+  # fetch ESAT directory
+  Dir.esat=Dir.esat.list[i]
+  
+  # 1. import ESAT counts into master table
+  flst <- list.files(path = Dir.esat, pattern = "esat.txt.gene.txt")
+  counts <- create_table(Dir.esat, flst) %>% rownames_to_column("key") %>%
+    tidyr::separate("key",into=c("gene",NA,NA),sep=";",remove=TRUE) %>% column_to_rownames("gene")
+  col.sum = data.frame(sample = colnames(counts), samplesum = apply(counts,2,sum))
+  
+  # remove mitochondria genes
+  counts <- counts %>% mutate(gene=rownames(.)) %>% 
+    dplyr::filter(!rownames(.) %in% MTgenes$V1) %>% dplyr::select(-"gene")
+  dim(counts)
+  
+  # 2. import UMI counts into master table (same layout as counts)
+  ulst <- list.files(path = Dir.esat, pattern = "\\.umi\\.distributions\\.txt$")
+  umis <- create_umi_table(Dir.esat, ulst)
+  umis <- umis %>% dplyr::filter(!rownames(.) %in% MTgenes$V1)
+
+  # align to the counts genes: genes with zero UMIs are absent from the UMI files
+  umis <- umis[rownames(counts), , drop = FALSE]
+  umis[is.na(umis)] <- 0
+  rownames(umis) <- rownames(counts)
+  
+  # mapping summary
+  info_alignment <- data.table::fread(paste0(Dir.esat,"/../summary/overall_summary.tsv")) %>%
+    set_colnames(c("sample","total_reads","multimapped_reads_aligned","unique_reads_aligned")) %>%
+    left_join( . , col.sum, by="sample") %>%
+    dplyr::mutate(reads_aligned = multimapped_reads_aligned + unique_reads_aligned) %>%
+    dplyr::mutate(all_aligned_reads_over_total = (multimapped_reads_aligned + unique_reads_aligned) / total_reads) %>%
+    dplyr::mutate(unique_aligned_reads_over_total = unique_reads_aligned / total_reads)
+
+  # metadata
+  metadata <- info_alignment
+  
+  # populate large list
+  counts.phase1.list[[i]] <- counts
+  umis.phase1.list[[i]] <- umis
+  metadata.phase1.list[[i]] <- metadata
+  rm(counts, umis, metadata, info_alignment, col.sum, flst, ulst, Dir.esat)
+}
+
+# combine all data frames by column
+counts.phase1 <- do.call(cbind, counts.phase1.list) %>%
+  dplyr::select(-F42_KRT_PBS_S1)# this was accidentally included in the run, but I used NovaSeq data for this sample instead
+
+umis.phase1 <- do.call(cbind, umis.phase1.list) %>%
+  dplyr::select(-F42_KRT_PBS_S1)
+
+# import metadata
+temp <- data.table::fread("/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/metadata_phase1_selected_metadata_07082025.txt") %>% arrange(sample)
+temp2 <- do.call(rbind, metadata.phase1.list) %>%
+  dplyr::filter(!sample=="F42_KRT_PBS_S1") %>%
+  arrange(sample) %>%
+  mutate(CS2=NA)
+metadata.phase1 <- left_join(temp, temp2, by="sample")
+metadata.phase1 <- metadata.phase1[,c("sample","read_length","donor","celltype","condition","CS2",
+                                      "phase","technical_rep","sequencing_platform",
+                                      "total_reads","multimapped_reads_aligned","unique_reads_aligned",
+                                      "samplesum","reads_aligned","all_aligned_reads_over_total","unique_aligned_reads_over_total")]
+
+rm(counts.phase1.list, metadata.phase1.list, temp, temp2)
+```
+### phase2 samples mapped with oldESAT (trimmed to 56bp)
+```{r load-56bp-oldESAT}
+Dir.esat.list=c("/pi/manuel.garber-umw/human/skin/eQTLs/Azenta_sequencing/03312025_3ctk_celseq2_atac_batch1/DolphinNext_celseq2/trimmed_FRB/archive2025/report11013/ESAT",
+                "/pi/manuel.garber-umw/human/skin/eQTLs/Azenta_sequencing/03312025_3ctk_celseq2_atac_batch1/DolphinNext_celseq2/trimmed_MEL/archive2025/report11012/ESAT/",
+                "/pi/manuel.garber-umw/human/skin/eQTLs/Azenta_sequencing/03312025_3ctk_celseq2_atac_batch1/DolphinNext_celseq2/trimmed_KRT/archive2025/report11011/ESAT/")
+
+# mitochondrial genes
+MTgenes <- read.table("/pi/manuel.garber-umw/human/skin/eQTLs/literature/UCSC_tracks/Ensembl_GRCh38.105_mitochondrial_genes.txt")
+
+counts.56bp.list <- list()
+umis.56bp.list <- list()
+metadata.56bp.list <- list()
+
+for (i in 1:length(Dir.esat.list)) {
+  # fetch ESAT directory
+  Dir.esat=Dir.esat.list[i]
+    
+  # 1. import ESAT counts into master table
+  flst <- list.files(path = Dir.esat, pattern = "esat.txt.gene.txt")
+  counts <- create_table(Dir.esat, flst) %>% rownames_to_column("key") %>%
+    tidyr::separate("key",into=c("gene",NA,NA),sep=";",remove=TRUE) %>% column_to_rownames("gene")
+  col.sum = data.frame(sample = colnames(counts), samplesum = apply(counts,2,sum))
+  
+  # remove mitochondria genes
+  counts <- counts %>% mutate(gene=rownames(.)) %>% 
+    dplyr::filter(!rownames(.) %in% MTgenes$V1) %>% dplyr::select(-"gene")
+  
+  # align to the counts genes: genes with zero UMIs are absent from the UMI files
+  umis <- umis[rownames(counts), , drop = FALSE]
+  umis[is.na(umis)] <- 0
+  rownames(umis) <- rownames(counts)
+  
+  # mapping summary
+  info_alignment <- data.table::fread(paste0(Dir.esat,"/../summary/overall_summary.tsv")) %>%
+    set_colnames(c("sample","total_reads","multimapped_reads_aligned","unique_reads_aligned")) %>%
+    left_join( . , col.sum, by="sample") %>%
+    dplyr::mutate(reads_aligned = multimapped_reads_aligned + unique_reads_aligned) %>%
+    dplyr::mutate(all_aligned_reads_over_total = (multimapped_reads_aligned + unique_reads_aligned) / total_reads) %>%
+    dplyr::mutate(unique_aligned_reads_over_total = unique_reads_aligned / total_reads)
+
+  # metadata
+  metadata <- info_alignment
+  
+  # populate large list
+  counts.56bp.list[[i]] <- counts
+  umis.56bp.list[[i]] <- umis
+  metadata.56bp.list[[i]] <- metadata
+  rm(counts, umis, metadata, info_alignment, col.sum, flst, ulst, Dir.esat)
+}
+# combine all data frames by column
+counts.56bp <- do.call(cbind, counts.56bp.list)
+umis.56bp <- do.call(cbind, umis.56bp.list)
+metadata.56bp <- do.call(rbind, metadata.56bp.list)
+metadata.56bp <- metadata.56bp[,c("sample","read_length","donor","celltype","condition","CS2",
+                                      "phase","technical_rep","sequencing_platform",
+                                      "total_reads","multimapped_reads_aligned","unique_reads_aligned",
+                                      "samplesum","reads_aligned","all_aligned_reads_over_total","unique_aligned_reads_over_total")]
+
+rm(counts.56bp.list, umis.56bp.list, metadata.56bp.list)
+```
+```{r compare counts_vs_umis in oldESATrun}
+# same genes and samples, in the same order?
+identical(rownames(counts.phase1), rownames(umis.phase1))
+identical(colnames(counts.phase1), colnames(umis.phase1))
+
+diff.mat <- as.matrix(counts.phase1) - as.matrix(umis.phase1)
+
+# overall: how many entries disagree?
+sum(diff.mat != 0)                 # number of gene x sample entries that differ
+mean(diff.mat != 0)                # fraction of all entries
+all.equal(as.matrix(counts.phase1), as.matrix(umis.phase1))   # TRUE if everything matches
+
+# long table of every disagreement, largest first
+disagree <- which(diff.mat != 0, arr.ind = TRUE)
+disagree.df <- data.frame(
+  gene   = rownames(diff.mat)[disagree[, "row"]],
+  sample = colnames(diff.mat)[disagree[, "col"]],
+  counts = as.matrix(counts.phase1)[disagree],
+  umis   = as.matrix(umis.phase1)[disagree],
+  diff   = diff.mat[disagree]
+) %>% dplyr::arrange(dplyr::desc(abs(diff)))
+head(disagree.df, 20)
+
+# per gene: in how many samples does it disagree?
+gene.summary <- disagree.df %>%
+  dplyr::group_by(gene) %>%
+  dplyr::summarise(n_samples = dplyr::n(), max_abs_diff = max(abs(diff))) %>%
+  dplyr::arrange(dplyr::desc(n_samples))
+head(gene.summary, 20)
+
+# per sample: how many genes disagree?
+sample.summary <- disagree.df %>% dplyr::count(sample, name = "n_genes") %>%
+  dplyr::arrange(dplyr::desc(n_genes))
+head(sample.summary, 20)
+```
+
+### re-create Manuel's UMI saturation plots
+```{r plot}
+## UMI saturation figure: 3 panels
+##   A. one library: UMI CPM vs read CPM, with the 4,096-UMI ceiling
+##   B. PBS fibroblasts: COL1A1 / ACTB CPM vs library size, UMI vs read CPM
+##   C. IFIT1 log2 fold change (IFN vs PBS) per donor, UMIs vs reads
+##
+## Needs in the session: umis.phase1 and reads.phase1 (gene x sample,
+## F42_KRT_PBS_S1 already dropped)
+## Packages: dplyr, tidyr, ggplot2, ggrepel, patchwork, scales
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggrepel)
+library(patchwork)
+
+## ---- settings -------------------------------------------------------------
+UMI_MAX    <- 4^6          # 6-nt UMI -> 4,096 possible sequences per gene (per barcode)
+EX_SAMPLE  <- "^F31_FRB_IFN_S2"   # regex for the panel A library. 
+CELL       <- "FRB"        # cell type for panels B and C
+TRT        <- "IFN"        # treatment label as it appears in the sample names
+CTRL       <- "PBS"
+FC_GENE    <- "IFIT1"
+B_GENES    <- c("COL1A1", "ACTB")
+LABEL_GENES <- c("FN1", "TPT1", "ISG15", "ACTB", "GAPDH", "COL1A1", "IFI6", "MX1", "IFIT1")
+PSEUDO     <- 1            # pseudocount (CPM) for the fold change
+
+## ---- 1. check inputs -------------------------------------------------------
+stopifnot(identical(rownames(counts.phase1), rownames(umis.phase1)),
+          identical(colnames(counts.phase1), colnames(umis.phase1)))
+
+## ---- 2. CPM ----------------------------------------------------------------
+umi.mat  <- as.matrix(umis.phase1)
+read.mat <- as.matrix(counts.phase1)
+lib.umis  <- colSums(umi.mat)
+lib.reads <- colSums(read.mat)
+umi.cpm  <- sweep(umi.mat,  2, lib.umis,  "/") * 1e6
+read.cpm <- sweep(read.mat, 2, lib.reads, "/") * 1e6
+
+## sample metadata 
+meta <- metadata.phase1
+
+log_breaks <- scales::trans_breaks("log10", function(x) 10^x)
+log_labels <- scales::trans_format("log10", scales::math_format(10^.x))
+
+## ---- Panel A: one library ---------------------------------------------------
+s1 <- grep(EX_SAMPLE, colnames(umi.mat), value = TRUE)[1]
+
+dA <- data.frame(gene  = rownames(umi.mat),
+                 x     = read.cpm[, s1],
+                 y     = umi.cpm[, s1],
+                 reads = read.mat[, s1],
+                 umis  = umi.mat[, s1]) %>%
+  filter(x > 0, y > 0)
+
+## slope-1 reference line anchored on unsaturated genes (read CPM 1-50):
+## where every molecule would be counted, UMI CPM is proportional to read CPM
+offsetA <- with(subset(dA, x > 1 & x < 50), median(log10(y) - log10(x)))
+ceilA   <- UMI_MAX / lib.umis[s1] * 1e6
+labA    <- filter(dA, gene %in% LABEL_GENES)
+fcg     <- filter(dA, gene == FC_GENE)
+
+pA <- ggplot(dA, aes(x, y)) +
+  geom_point(color = "grey60", size = 0.4, alpha = 0.5) +
+  geom_abline(slope = 1, intercept = offsetA, linetype = "dashed", color = "grey20") +
+  geom_hline(yintercept = ceilA, linetype = "dotted", color = "firebrick") +
+  geom_point(data = labA, color = "firebrick", size = 2) +
+  geom_text_repel(data = labA, aes(label = gene), size = 3,
+                  nudge_y = 0.8, direction = "x", segment.color = "grey40",
+                  min.segment.length = 0) +
+  annotate("text", x = 0, y = Inf, hjust = -0.05, vjust = 1.5, size = 3.3,
+           label = sprintf("%s: %s reads \u2192 %s UMIs", FC_GENE,
+                           format(fcg$reads, big.mark = ","),
+                           format(fcg$umis, big.mark = ","))) +
+  scale_x_log10(breaks = log_breaks, labels = log_labels) +
+  scale_y_log10(breaks = log_breaks, labels = log_labels) +
+  labs(x = "Reads per gene / library reads (CPM)",
+       y = "UMIs per gene / library UMIs (CPM)",
+       title = sprintf("One library (%s): highly expressed\ngenes hit a ceiling", s1),
+       caption = sprintf("dashed: expected if every molecule were counted\ndotted: ceiling of %s UMIs per gene",
+                         format(UMI_MAX, big.mark = ","))) +
+  theme_classic(base_size = 11)
+
+## ---- Panel B: same genes across PBS libraries ------------------------------
+pbs <- meta %>% filter(cell == CELL, cond == CTRL) %>% pull(sample)
+
+dB <- expand.grid(sample = pbs, gene = B_GENES, stringsAsFactors = FALSE) %>%
+  mutate(lib        = lib.umis[sample],
+         `UMI CPM`  = umi.cpm[cbind(gene, sample)],
+         `read CPM` = read.cpm[cbind(gene, sample)]) %>%
+  pivot_longer(c(`UMI CPM`, `read CPM`), names_to = "measure", values_to = "cpm") %>%
+  mutate(series = paste(gene, measure, sep = ", "))
+
+ceilB <- data.frame(lib = exp(seq(log(min(dB$lib)), log(max(dB$lib)), length.out = 100))) %>%
+  mutate(cpm = UMI_MAX / lib * 1e6)
+
+series_lv <- as.vector(outer(B_GENES, c("UMI CPM", "read CPM"), paste, sep = ", "))
+shapes <- setNames(c(16, 15, 1, 0), series_lv)   # filled = UMI, open = read; circle/square per gene
+cols   <- setNames(rep(c("steelblue", "firebrick"), each = 2), series_lv)
+
+pB <- ggplot(dB, aes(lib, cpm)) +
+  geom_line(data = ceilB, linetype = "dotted", color = "firebrick") +
+  geom_point(aes(shape = series, color = series), size = 2, stroke = 0.8) +
+  scale_shape_manual(values = shapes, breaks = series_lv, name = NULL) +
+  scale_color_manual(values = cols,  breaks = series_lv, name = NULL) +
+  scale_x_log10(labels = scales::label_number(scale = 1e-6, suffix = "M")) +
+  scale_y_log10(breaks = log_breaks, labels = log_labels) +
+  labs(x = "Library size (total UMIs)", y = "CPM",
+       title = sprintf("Same genes, %d %s %s libraries: UMI CPM\nfalls as libraries get deeper; read CPM does not",
+                       length(pbs), CTRL, CELL),
+       caption = sprintf("dotted: %s-UMI ceiling", format(UMI_MAX, big.mark = ","))) +
+  theme_classic(base_size = 11) +
+  theme(legend.position = "inside", legend.position.inside = c(0.3, 0.12),
+        legend.background = element_blank()) +
+  guides(shape = guide_legend(ncol = 2), color = guide_legend(ncol = 2))
+
+## ---- Panel C: fold change per donor ----------------------------------------
+fold_change <- function(cpm, gene) {
+  meta %>%
+    filter(cell == CELL, cond %in% c(TRT, CTRL)) %>%
+    mutate(value = cpm[gene, sample]) %>%
+    group_by(donor, cond) %>%                    # average replicates within donor
+    summarise(value = mean(value), .groups = "drop") %>%
+    pivot_wider(names_from = cond, values_from = value) %>%
+    filter(!is.na(.data[[TRT]]), !is.na(.data[[CTRL]])) %>%   # donors with both conditions
+    mutate(lfc = log2((.data[[TRT]] + PSEUDO) / (.data[[CTRL]] + PSEUDO))) %>%
+    select(donor, lfc)
+}
+
+dC <- bind_rows(UMIs  = fold_change(umi.cpm,  FC_GENE),
+                Reads = fold_change(read.cpm, FC_GENE), .id = "measure") %>%
+  mutate(measure = factor(measure, levels = c("UMIs", "Reads")))
+medC <- dC %>% group_by(measure) %>% summarise(m = median(lfc))
+nC   <- n_distinct(dC$donor)
+
+pC <- ggplot(dC, aes(measure, lfc)) +
+  geom_line(aes(group = donor), color = "grey75") +
+  geom_point(aes(color = measure), size = 2) +
+  geom_errorbar(data = medC, aes(x = measure, ymin = m, ymax = m, color = measure),
+                width = 0.35, linewidth = 1.3, inherit.aes = FALSE) +
+  geom_text(data = medC, aes(x = measure, y = m, label = sprintf("%.1f", m), color = measure),
+            nudge_x = 0.3, size = 3.5, inherit.aes = FALSE) +
+  scale_color_manual(values = c(UMIs = "steelblue", Reads = "firebrick"), guide = "none") +
+  labs(x = NULL, y = sprintf("%s log2 fold change, %s vs %s", FC_GENE, TRT, CTRL),
+       title = sprintf("%s induction per donor\n(%d %s donors)", FC_GENE, nC, CELL)) +
+  theme_classic(base_size = 11)
+
+## ---- assemble --------------------------------------------------------------
+fig <- (pA | pB | pC) + plot_layout(widths = c(1.15, 1, 0.75)) +
+  plot_annotation(
+    title = sprintf("6-nt UMIs allow only %s distinct molecules per gene: counts of highly expressed genes saturate",
+                    format(UMI_MAX, big.mark = ",")),
+    theme = theme(plot.title = element_text(face = "bold", size = 14)))
+
+ggsave("umi_saturation.png", fig, width = 18, height = 6.5, dpi = 300)
+ggsave("umi_saturation.pdf", fig, width = 18, height = 6.5)
+fig
+```

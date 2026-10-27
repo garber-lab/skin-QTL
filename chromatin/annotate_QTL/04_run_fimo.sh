@@ -1,6 +1,5 @@
 #!/bin/bash
 set -euo pipefail
-
 module load bedtools
 
 workingdir=$1
@@ -13,6 +12,7 @@ memeF=/pi/manuel.garber-umw/human/skin/eQTLs/integrative_analysis/FIMO/motif_dat
 export PATH=/home/shuo.shan-umw/meme/bin:/home/shuo.shan-umw/meme/libexec/meme-5.5.5:$PATH
 
 cd "${workingdir}"
+echo "fimo starting for snp" > "${workingdir}/fimo_status.txt"
 
 ########## create SNP bed if needed
 if [[ -z "${snp_bed}" || ! -f "${snp_bed}" ]]; then
@@ -32,61 +32,127 @@ date
 ### build REF and ALT fasta explicitly and compute SNP position within sequence
 cp "${snp_bed}" SNP.bed
 python3 <<'PY'
+import sys
+
 with open("SNP.bed") as f:
-    chrom, start, end, snp_id, ref, alt = f.readline().strip().split()[:6]
+    fields = f.readline().strip().split()
+
+if len(fields) < 6:
+    raise ValueError("SNP.bed must contain at least 6 columns: chrom start end id ref alt")
+
+chrom, start, end, snp_id, ref, alt = fields[:6]
+
 start = int(start)
 end   = int(end)
 ref   = ref.upper()
 alt   = alt.upper()
 
-if ',' in alt:
-    raise ValueError(f"Multi-allelic SNP not supported: ALT={alt}")
+if "," in alt:
+    raise ValueError(f"Multi-allelic variant not supported: ALT={alt}")
 
 with open("SNP_slop100.bed") as f:
     wchrom, wstart, wend = f.readline().strip().split()[:3]
+
 wstart = int(wstart)
 wend   = int(wend)
 
-snp_idx0 = start - wstart
-snp_pos1 = snp_idx0 + 1
+variant_idx0 = start - wstart
+variant_pos1 = variant_idx0 + 1
 
-lines  = [x.strip() for x in open("SNP_slop100.fa") if x.strip()]
-seq    = "".join(lines[1:]).upper()
+lines = [x.strip() for x in open("SNP_slop100.fa") if x.strip()]
+seq = "".join(lines[1:]).upper()
 
-if snp_idx0 < 0 or snp_idx0 >= len(seq):
-    raise ValueError(f"SNP index out of range: snp_idx0={snp_idx0}, seq_len={len(seq)}")
+if variant_idx0 < 0 or variant_idx0 >= len(seq):
+    raise ValueError(f"Variant index out of range: variant_idx0={variant_idx0}, seq_len={len(seq)}")
 
-genome_base = seq[snp_idx0]
+fasta_ref_span = seq[variant_idx0:(variant_idx0 + len(ref))]
+fasta_alt_span = seq[variant_idx0:(variant_idx0 + len(alt))]
 
-print(f"[DEBUG] SNP={snp_id}")
+if fasta_ref_span == ref:
+    fasta_anchor_allele = "REF"
+    fasta_anchor_len = len(ref)
+    fasta_anchor_seq = fasta_ref_span
+elif fasta_alt_span == alt:
+    fasta_anchor_allele = "ALT"
+    fasta_anchor_len = len(alt)
+    fasta_anchor_seq = fasta_alt_span
+    print(
+        f"[WARN] FASTA matches BED ALT rather than BED REF; keeping BED REF/ALT labels: "
+        f"bed_REF={ref}, bed_ALT={alt}, fasta_at_variant={fasta_anchor_seq}, "
+        f"variant={chrom}:{start}-{end}",
+        file=sys.stderr,
+    )
+else:
+    raise ValueError(
+        f"Neither BED allele matches FASTA at variant site: "
+        f"bed_REF={ref}, fasta_REF_span={fasta_ref_span}, "
+        f"bed_ALT={alt}, fasta_ALT_span={fasta_alt_span}, "
+        f"variant={chrom}:{start}-{end}. "
+        f"Check genome build, coordinates, and allele columns."
+    )
+
+left  = seq[:variant_idx0]
+right = seq[(variant_idx0 + fasta_anchor_len):]
+
+seq_ref = left + ref + right
+seq_alt = left + alt + right
+
+ref_start1 = variant_pos1
+ref_end1   = variant_pos1 + len(ref) - 1
+
+alt_start1 = variant_pos1
+alt_end1   = variant_pos1 + len(alt) - 1
+
+variant_type = (
+    "SNV" if len(ref) == 1 and len(alt) == 1 else
+    "deletion" if len(ref) > len(alt) else
+    "insertion" if len(ref) < len(alt) else
+    "MNV"
+)
+
+print(f"[DEBUG] variant={snp_id}")
+print(f"[DEBUG] variant_type={variant_type}")
 print(f"[DEBUG] window={wchrom}:{wstart}-{wend}")
-print(f"[DEBUG] SNP genomic={chrom}:{start}-{end}")
-print(f"[DEBUG] seq_len={len(seq)}")
-print(f"[DEBUG] snp_idx0={snp_idx0}")
-print(f"[DEBUG] snp_pos1={snp_pos1}")
-print(f"[DEBUG] fasta_base_at_snp={genome_base}")
+print(f"[DEBUG] genomic={chrom}:{start}-{end}")
+print(f"[DEBUG] original_seq_len={len(seq)}")
+print(f"[DEBUG] REF_seq_len={len(seq_ref)}")
+print(f"[DEBUG] ALT_seq_len={len(seq_alt)}")
+print(f"[DEBUG] variant_idx0={variant_idx0}")
+print(f"[DEBUG] variant_pos1={variant_pos1}")
+print(f"[DEBUG] fasta_anchor_allele={fasta_anchor_allele}")
+print(f"[DEBUG] fasta_anchor_at_variant={fasta_anchor_seq}")
 print(f"[DEBUG] bed_REF={ref}")
 print(f"[DEBUG] bed_ALT={alt}")
 
-seq_ref           = list(seq)
-seq_alt           = list(seq)
-seq_ref[snp_idx0] = ref
-seq_alt[snp_idx0] = alt
-
 with open("SNP_slop100_REF.fa", "w") as out:
-    out.write(f">{snp_id}|REF|snp_pos={snp_pos1}\n")
-    out.write("".join(seq_ref) + "\n")
+    out.write(f">{snp_id}|REF|variant_pos={variant_pos1}|variant_type={variant_type}\n")
+    out.write(seq_ref + "\n")
 
 with open("SNP_slop100_ALT.fa", "w") as out:
-    out.write(f">{snp_id}|ALT|snp_pos={snp_pos1}\n")
-    out.write("".join(seq_alt) + "\n")
+    out.write(f">{snp_id}|ALT|variant_pos={variant_pos1}|variant_type={variant_type}\n")
+    out.write(seq_alt + "\n")
 
+# Keep old file name for downstream compatibility.
 with open("snp_position_in_seq.txt", "w") as out:
-    out.write(str(snp_pos1) + "\n")
+    out.write(str(variant_pos1) + "\n")
+
+with open("variant_interval_REF.txt", "w") as out:
+    out.write(f"{ref_start1}\t{ref_end1}\n")
+
+with open("variant_interval_ALT.txt", "w") as out:
+    out.write(f"{alt_start1}\t{alt_end1}\n")
+
+with open("variant_info.tsv", "w") as out:
+    out.write("variant_id\tchrom\tstart\tend\tref\talt\tvariant_type\tvariant_pos1\tref_start1\tref_end1\talt_start1\talt_end1\tref_seq_len\talt_seq_len\n")
+    out.write(
+        f"{snp_id}\t{chrom}\t{start}\t{end}\t{ref}\t{alt}\t{variant_type}\t"
+        f"{variant_pos1}\t{ref_start1}\t{ref_end1}\t{alt_start1}\t{alt_end1}\t"
+        f"{len(seq_ref)}\t{len(seq_alt)}\n"
+    )
 PY
 
-snp_pos_seq=$(cat snp_position_in_seq.txt)
-echo "SNP position in sequence (1-based) = ${snp_pos_seq}"
+variant_pos_seq=$(cat snp_position_in_seq.txt)
+echo "Variant anchor position in sequence (1-based) = ${variant_pos_seq}"
 
 ### run FIMO on REF and ALT — no p-value threshold, capture all hits
 for allele in REF ALT; do
@@ -99,20 +165,25 @@ for allele in REF ALT; do
     ### keep only motifs whose hit window overlaps the SNP position
     ### FIMO columns: 1=motif_id 2=motif_alt_id 3=sequence_name
     ###               4=start 5=stop 6=strand 7=score 8=p-value 9=q-value 10=matched_sequence
-    awk -v snp="${snp_id}" -v allele="${allele}" -v pos="${snp_pos_seq}" '
-        BEGIN{FS=OFS="\t"}
-        { if ($4 <= pos && $5 >= pos) print snp, allele, $0 }
-    ' "fimo_all_${allele}.tsv" > "fimo_snp_overlap_${allele}.tsv"
+    interval_file="variant_interval_${allele}.txt"
+    var_start=$(cut -f1 "${interval_file}")
+    var_end=$(cut -f2 "${interval_file}")
 
+    awk -v snp="${snp_id}" -v allele="${allele}" \
+        -v var_start="${var_start}" -v var_end="${var_end}" '
+        BEGIN{FS=OFS="\t"}
+        { if ($4 <= var_end && $5 >= var_start) print snp, allele, $0 }
+    ' "fimo_all_${allele}.tsv" > "fimo_snp_overlap_${allele}.tsv"
 done
 
 echo "ran FIMO on REF and ALT"
 date
 
 ### merge REF/ALT overlapping hits and classify differences
-source /home/shuo.shan-umw/miniconda3/etc/profile.d/conda.sh
-conda activate fastQTL
-python3 <<'PY'
+#source /home/shuo.shan-umw/miniconda3/etc/profile.d/conda.sh
+#module load conda
+#source activate fastQTL
+/home/shuo.shan-umw/miniconda3/envs/fastQTL/bin/python3 <<'PY'
 import pandas as pd
 import numpy as np
 
@@ -190,15 +261,19 @@ merged.to_csv("fimo_REF_ALT_comparison.tsv", sep="\t", index=False)
 PY
 
 ### move final output
+[[ -s fimo_REF_ALT_comparison.tsv ]] || {
+    echo "ERROR: merge failed; fimo_REF_ALT_comparison.tsv was not created" >&2
+    exit 1
+}
 mv fimo_REF_ALT_comparison.tsv "${workingdir}/fimo_output_${snp_id}.txt"
 
 echo "merged FIMO output written to ${workingdir}/fimo_output_${snp_id}.txt"
 date
 
 ### clean up intermediates
-rm -f SNP.bed snp_position_in_seq.txt \
-      SNP_slop100.bed SNP_slop100.fa \
-      SNP_slop100_REF.fa SNP_slop100_ALT.fa \
+rm -f SNP_slop100.bed SNP_slop100.fa \
       fimo_all_REF.tsv fimo_all_ALT.tsv \
       fimo_snp_overlap_REF.tsv fimo_snp_overlap_ALT.tsv
 rm -rf "${workingdir}/results_REF" "${workingdir}/results_ALT"
+echo "fimo already done for snp" > "${workingdir}/fimo_status.txt"
+

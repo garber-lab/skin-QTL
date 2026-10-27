@@ -1,18 +1,18 @@
 #!/bin/bash
-#BSUB -J chrombpnet_merged_KRT_PBS_fold0
+#BSUB -J chrombpnet_merged_KRT_PBS_fold2
 #BSUB -n 10
 #BSUB -R "span[hosts=1]"
-#BSUB -R "rusage[mem=4500]"
+#BSUB -R "rusage[mem=10000]"
 #BSUB -q gpu
 #BSUB -W 72:00
-#BSUB -e "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/chrombpnet/log/pipeline_KRT_PBS_merged_fold0.%J_%I.err"
-#BSUB -o "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/chrombpnet/log/pipeline_KRT_PBS_merged_fold0.%J_%I.out"
+#BSUB -e "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/chrombpnet/log/pipeline_KRT_PBS_merged_fold2.%J_%I.err"
+#BSUB -o "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/chrombpnet/log/pipeline_KRT_PBS_merged_fold2.%J_%I.out"
 
 # ============================================================
 # DEFINE ONCE HERE — only touch these when changing runs
 # ============================================================
 BIAS_FACTOR=0.5
-FOLD=0                          # ← change this for each fold (0,1,2,3,4)
+FOLD=2
 sample=KRT_PBS
 prefix=ATAC_${sample}_merged_alldonors
 bam_prefix=${prefix}

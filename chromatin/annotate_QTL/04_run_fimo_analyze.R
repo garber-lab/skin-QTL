@@ -1,6 +1,11 @@
 library(dplyr)
 library(readr)
 library(stringr)
+library(magrittr)
+library(data.table)
+library(tidyr)
+library(tibble)
+
 path.Rscript.fetch_expressed_genes="/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/analysis_07142025/fetch_expressed_genes.R"
 source(path.Rscript.fetch_expressed_genes)
 path.Rscript.fetch_DE_genes="/pi/manuel.garber-umw/human/skin/eQTLs/RNA-Seq/analysis_07142025/fetch_DE_genes_log2FC1_padj0.05.R"
@@ -22,20 +27,50 @@ this_snp <- args[2]
 this_celltype <- args[3] 
 this_condition <- args[4]
 
-# dir <- "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/annotate_QTL/rs2287921"
-# this_snp <- "rs2287921"
-# this_celltype <- "FRB"
-# this_condition <- "TNF"
+# dir <- "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/annotate_QTL/rs6693567"
+# this_snp <- "rs6693567"
+# this_celltype <- "KRT"
+# this_condition <- "IFNG"
+
+cat(sprintf(
+  "[FIMO_ANALYZE_START] snp=%s celltype=%s condition=%s dir=%s\n",
+  this_snp, this_celltype, this_condition, dir
+))
+
+options(error = function() {
+  cat(sprintf(
+    "\n[FIMO_ANALYZE_ERROR] snp=%s celltype=%s condition=%s dir=%s\n",
+    this_snp, this_celltype, this_condition, dir
+  ), file = stderr())
+  traceback(2)
+  q(status = 1)
+})
 
 fimo_file <- paste0(dir, "/fimo_output_", this_snp, ".txt")
 out_file <- paste0(dir, "/fimo_output_analysis_",this_snp,"_",this_celltype,"_",this_condition,".txt")
 
-snp_seq_ref <- fread(paste0(dir,"/SNP_slop100_REF.fa"))
-snp_seq_alt <- fread(paste0(dir,"/SNP_slop100_ALT.fa"))
+variant_info_file <- file.path(dir, "variant_info.tsv")
+variant_info <- if (file.exists(variant_info_file)) {
+  fread(variant_info_file)
+} else {
+  data.table(
+    variant_id = this_snp,
+    variant_type = "unknown"
+  )
+}
+
+cat(sprintf(
+  "[FIMO_ANALYZE_VARIANT] snp=%s variant_type=%s\n",
+  this_snp,
+  variant_info$variant_type[1]
+))
 
 # -----------------------------
 # read FIMO comparison result
 # -----------------------------
+if (!file.exists(fimo_file)) {
+  stop("Missing FIMO comparison file: ", fimo_file)
+}
 fimo <- read_tsv(fimo_file, show_col_types = FALSE) %>%
   dplyr::mutate(TF = str_replace(motif_id, "\\.H12CORE.*$", ""))
 
@@ -154,4 +189,5 @@ cat("Wrote fimo TF result to:", out_file, "\n")
 # save RDS for downstream processing
 # -------------------------------
 out_prefix <- paste0(dir, "/fimo_summary_", this_snp, "_", this_celltype, "_", this_condition)
-save(fimo, fimo2, tf_ranked, file = paste0(out_prefix, "objects.RData"))
+save(fimo, fimo2, tf_ranked, variant_info,
+     file = paste0(out_prefix, "_objects.RData"))

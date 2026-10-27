@@ -39,7 +39,7 @@ mkdir -p ${basename}
 mv *.pdf ${basename}
 
 export R_LIBS_USER="$HOME/R/x86_64-pc-linux-gnu-library/4.2"
-singularity exec /share/pkg/containers/rstudio_example/r_4.2.2.sif \
+singularity exec /share/pkg/containers/rstudio_example/r_4.5.2.sif \
 	Rscript ${DIR}/step6_combine_all_plots.R ${DIR}/plots/temp_output/${basename}
 
 rm -r ${basename}

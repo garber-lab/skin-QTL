@@ -21,7 +21,10 @@ atac_bed=/pi/manuel.garber-umw/human/skin/eQTLs/ATACseq_DolphinNext/encode_atacs
 
 cd ${workingdir}
 
-awk 'NR==1' ${atacPeaks} | awk '{OFS=FS="\t"}{print "snp_chr","snp_start","snp_end","snp","REF","ALT",$0}' > ${workingdir}/${snp_id}_SNP_ATAC_overlap.txt
-bedtools intersect -a ${snp_bed} -b ${atac_bed} -wa -wb >> ${workingdir}/${snp_id}_SNP_ATAC_overlap.txt
+awk 'BEGIN { FS=OFS="\t" } NR == 1 {
+    print "snp_chr","snp_start","snp_end","snp",$0
+}' "${atacPeaks}" > "${workingdir}/${snp_id}_SNP_ATAC_overlap.txt"
+
+bedtools intersect -a "${snp_bed}" -b "${atac_bed}" -wa -wb >> "${workingdir}/${snp_id}_SNP_ATAC_overlap.txt"
 
 echo "Wrote result to ${workingdir}/${snp_id}_SNP_ATAC_overlap.txt"; date

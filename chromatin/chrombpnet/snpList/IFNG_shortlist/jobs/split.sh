@@ -1,0 +1,4 @@
+#!/bin/bash
+module load conda; source activate fastQTL
+set -euo pipefail
+singularity exec --nv --env PYTHONPATH=/home/shuo.shan-umw/miniconda3/envs/fastQTL/lib/python3.9/site-packages --env TF_FORCE_GPU_ALLOW_GROWTH=true /pi/manuel.garber-umw/human/skin/eQTLs/chromatin/chrombpnet/chrombpnet_latest.sif bash -c "export PYTHONPATH=/home/shuo.shan-umw/miniconda3/envs/fastQTL/lib/python3.9/site-packages; python /pi/manuel.garber-umw/human/skin/eQTLs/chromatin/chrombpnet/step6b_snpList_split.py     --batch /pi/manuel.garber-umw/human/skin/eQTLs/chromatin/chrombpnet/snpList/IFNG_shortlist --outroot /pi/manuel.garber-umw/human/skin/eQTLs/chromatin/chrombpnet/posterchild --variants /pi/manuel.garber-umw/human/skin/eQTLs/chromatin/chrombpnet/snpList/IFNG_shortlist/variants.tsv     --models FRB_IFN,FRB_PBS,KRT_IFN,KRT_PBS,MEL_IFN,MEL_PBS --folds 0,1,2,3,4 --heads counts,profile"

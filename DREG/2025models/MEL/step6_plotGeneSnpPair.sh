@@ -74,7 +74,7 @@ echo "got modeling stats"
 # ------------ call Rscript to plot --------------- #
 echo "plotting now..."
 export R_LIBS_USER="$HOME/R/x86_64-pc-linux-gnu-library/4.2"
-singularity exec /share/pkg/containers/rstudio_example/r_4.2.2.sif \
+singularity exec /share/pkg/containers/rstudio_example/r_4.5.2.sif \
 	Rscript ${DIR}/step6_make_plot_for_pair_in_window.R ${ct} ${g} ${snp}
 
 cd ${DIR}/plots

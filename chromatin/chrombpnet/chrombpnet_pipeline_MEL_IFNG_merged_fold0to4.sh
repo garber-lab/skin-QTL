@@ -1,18 +1,18 @@
 #!/bin/bash
-#BSUB -J chrombpnet_merged_MEL_IFN_fold0
+#BSUB -J chrombpnet_merged_MEL_IFN_fold4
 #BSUB -n 10
 #BSUB -R "span[hosts=1]"
 #BSUB -R "rusage[mem=4000]"
 #BSUB -q gpu
 #BSUB -W 72:00
-#BSUB -e "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/chrombpnet/log/pipeline_MEL_IFN_merged_fold0.%J_%I.err"
-#BSUB -o "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/chrombpnet/log/pipeline_MEL_IFN_merged_fold0.%J_%I.out"
+#BSUB -e "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/chrombpnet/log/pipeline_MEL_IFN_merged_fold4.%J_%I.err"
+#BSUB -o "/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/chrombpnet/log/pipeline_MEL_IFN_merged_fold4.%J_%I.out"
 
 # ============================================================
 # DEFINE ONCE HERE — only touch these when changing runs
 # ============================================================
 BIAS_FACTOR=0.5
-FOLD=0                          # ← change this for each fold (0,1,2,3,4)
+FOLD=4
 sample=MEL_IFN
 prefix=ATAC_${sample}_merged_alldonors
 bam_prefix=${prefix}

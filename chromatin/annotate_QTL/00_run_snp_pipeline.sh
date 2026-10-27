@@ -10,7 +10,7 @@ SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/scripts" && pwd)"
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 workingdir="${BASE_DIR}/${snp_id}"
 
-snp_id=rs838146
+snp_id=rs6693567
 SCRIPTS_DIR="/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/annotate_QTL/"
 BASE_DIR="/pi/manuel.garber-umw/human/skin/eQTLs/chromatin/annotate_QTL/"
 workingdir="${BASE_DIR}/${snp_id}"
@@ -34,8 +34,8 @@ bash "${SCRIPTS_DIR}/03_overlap_tfbs.sh" "${workingdir}" "${snp_id}" "${snp_bed}
 # ── Step 4: FIMO motif analysis ─────────────────────────────────────────────
 echo -e "\n[Step 4] Running FIMO..." ; date
 bash "${SCRIPTS_DIR}/04_run_fimo.sh" "${workingdir}" "${snp_id}" "${snp_bed}"
-ct=FRB
-cond=TNF
+ct=KRT
+cond=IFNG
 singularity exec /share/pkg/containers/rstudio_example/r_4.5.2.sif \
 	Rscript ${SCRIPTS_DIR}/04_run_fimo_analyze.R "${workingdir}" "${snp_id}" "${ct}" "${cond}"
 

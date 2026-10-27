@@ -32,6 +32,7 @@ dir <- paste0("/pi/manuel.garber-umw/human/skin/eQTLs/DREG/2025models/",ct,"/eig
 f <- fread(paste0(dir,"/",infile))
 
 # performs BH multiple testing correction
+f[, p_gene_eigenMT := -expm1(Meff * log1p(-pmin))]
 f$q_gene = p.adjust(f$p_gene_eigenMT, method="BH")
 f = f %>% arrange(q_gene,pmin)
 f_gene_fdr05 <- f[which(f$q_gene<0.05),] %>% arrange(q_gene,pmin)
